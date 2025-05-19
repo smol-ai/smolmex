@@ -84,28 +84,31 @@ function getCsrfToken() {
   return null;
 }
 
-// Get Bearer token from localStorage (X.COM stores it here for web)
-function getBearerToken() {
-  log('AUTH', 'Attempting to retrieve Bearer token from localStorage...', 'info');
-  // Try common keys used by Twitter/X web
-  const keys = ['access_token', 'auth_token', 'BearerToken'];
-  for (const key of keys) {
-    const val = window.localStorage.getItem(key);
-    if (val && val.startsWith('AAAA')) { // Twitter Bearer tokens start with 'AAAA...'
-      log('AUTH', `Bearer token found in localStorage key: ${key}`, 'success');
-      return val;
-    }
+// Get Bearer token from background script via messaging
+async function getBearerToken() {
+  log('AUTH', 'Requesting Bearer token from background script...', 'info');
+  try {
+    return await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'GET_BEARER_TOKEN' }, (response) => {
+        if (chrome.runtime.lastError) {
+          log('AUTH', `chrome.runtime.lastError: ${chrome.runtime.lastError.message}`, 'error');
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!response || !response.bearerToken) {
+          log('AUTH', 'No Bearer token received from background script.', 'error');
+          reject(new Error('No Bearer token received'));
+          return;
+        }
+        log('AUTH', `Received Bearer token from background script: ${response.bearerToken.slice(0,12)}...`, 'success');
+        resolve(response.bearerToken);
+      });
+    });
+  } catch (e) {
+    log('AUTH', `Failed to get Bearer token: ${e.message}`, 'error');
+    log('AUTH', `Error stack: ${e.stack}`, 'error');
+    return null;
   }
-  // Fallback: Try to extract from any key that looks like a Bearer token
-  for (const key of Object.keys(window.localStorage)) {
-    const val = window.localStorage.getItem(key);
-    if (val && val.startsWith('AAAA')) {
-      log('AUTH', `Bearer token found in localStorage key: ${key} (fallback)`, 'success');
-      return val;
-    }
-  }
-  log('AUTH', 'Bearer token NOT found in localStorage.', 'error');
-  return null;
 }
 
 // Generate a pseudo x-client-transaction-id (since real ones are per-request)
@@ -122,11 +125,12 @@ function generateTransactionId() {
 
 async function fetchProfileTimeline(username) {
   log('FETCH', `Preparing to fetch timeline for @${username}`, 'info');
-  const bearer = getBearerToken();
+  const bearer = await getBearerToken();
   const csrf = getCsrfToken();
   const transactionId = generateTransactionId();
   if (!bearer || !csrf) {
     log('FETCH', `Missing tokens. Bearer: ${!!bearer}, CSRF: ${!!csrf}`, 'error');
+    log('FETCH', `Bearer: ${bearer}, CSRF: ${csrf}`, 'error');
     return;
   }
   // Compose API URL for user's timeline
