@@ -72,48 +72,36 @@ function getProfileUsernameFromUrl(url) {
 }
 
 
-// Get CSRF token from cookies
-function getCsrfToken() {
-  log('CSRF', 'Attempting to retrieve CSRF token from cookies...', 'info');
-  const match = document.cookie.match(/(?:^|; )ct0=([^;]*)/);
-  if (match) {
-    log('CSRF', `CSRF token found: ${match[1]}`, 'success');
-    return match[1];
-  }
-  log('CSRF', 'CSRF token NOT found in cookies.', 'warn');
-  return null;
-}
 
 // Get Bearer token from background script via messaging
-async function getBearerToken() {
+async function getAuthTokens() {
   log('AUTH', 'Requesting Bearer token from background script...', 'info');
   try {
     return await new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: 'GET_BEARER_TOKEN' }, (response) => {
+      chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKENS' }, (response) => {
         if (chrome.runtime.lastError) {
           log('AUTH', `chrome.runtime.lastError: ${chrome.runtime.lastError.message}`, 'error');
           reject(new Error(chrome.runtime.lastError.message));
           return;
         }
-        if (!response || !response.bearerToken) {
-          log('AUTH', 'No Bearer token received from background script.', 'error');
-          reject(new Error('No Bearer token received'));
+        if (!response || (!response.bearerToken && !response.csrfToken && !response.transactionId)) {
+          log('AUTH', 'No auth tokens received from background script.', 'error');
+          reject(new Error('No auth tokens received'));
           return;
         }
-        log('AUTH', `Received Bearer token from background script: ${response.bearerToken.slice(0,12)}...`, 'success');
-        resolve(response.bearerToken);
+        log('AUTH', `Received from background: Bearer: ${response.bearerToken ? response.bearerToken.slice(0,12)+'...' : 'none'}, CSRF: ${response.csrfToken ? response.csrfToken.slice(0,12)+'...' : 'none'}, TransactionId: ${response.transactionId ? response.transactionId.slice(0,12)+'...' : 'none'}`, 'success');
+        resolve(response);
       });
     });
   } catch (e) {
-    log('AUTH', `Failed to get Bearer token: ${e.message}`, 'error');
+    log('AUTH', `Failed to get auth tokens: ${e.message}`, 'error');
     log('AUTH', `Error stack: ${e.stack}`, 'error');
-    return null;
+    return { bearerToken: null, csrfToken: null, transactionId: null };
   }
 }
 
-// Generate a pseudo x-client-transaction-id (since real ones are per-request)
+// Generate a pseudo x-client-transaction-id (fallback, not used if real one available)
 function generateTransactionId() {
-  // Not cryptographically secure, but sufficient for X.COM API
   const arr = new Uint8Array(16);
   window.crypto.getRandomValues(arr);
   return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
@@ -125,39 +113,92 @@ function generateTransactionId() {
 
 async function fetchProfileTimeline(username) {
   log('FETCH', `Preparing to fetch timeline for @${username}`, 'info');
-  const bearer = await getBearerToken();
-  const csrf = getCsrfToken();
-  const transactionId = generateTransactionId();
-  if (!bearer || !csrf) {
-    log('FETCH', `Missing tokens. Bearer: ${!!bearer}, CSRF: ${!!csrf}`, 'error');
-    log('FETCH', `Bearer: ${bearer}, CSRF: ${csrf}`, 'error');
+  const { bearerToken, csrfToken, searchTimelineQueryId } = await getAuthTokens();
+
+  //////////////////////////////
+  // Transaction ID Request Demo //
+  //////////////////////////////
+
+  /**
+   * Request a transaction ID from the active Twitter/X tab via background.js relay.
+   * Logs result to console and can be plugged into UI as needed.
+   */
+  function requestTransactionIdFromActiveTab() {
+    log('TID', 'Requesting Transaction ID from active Twitter/X tab...', 'info');
+    chrome.runtime.sendMessage({
+      action: 'relayToActiveTab',
+      payload: { action: 'generateTID' }
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        log('TID', `Error relaying to background: ${chrome.runtime.lastError.message}`, 'error');
+        return;
+      }
+      if (response && response.tid) {
+        log('TID', `Transaction ID: ${response.tid}`, 'success');
+        // You can now use response.tid in your UI or API calls
+      } else {
+        log('TID', `Failed to get TID: ${response && response.error}`, 'error');
+      }
+    });
+  }
+
+  // Demo: Request TID on panel load
+  const transactionId = requestTransactionIdFromActiveTab();
+  log('FETCH', `Tokens for fetch: Bearer: ${bearerToken ? bearerToken.slice(0,12)+'...' : 'none'}, CSRF: ${csrfToken ? csrfToken.slice(0,12)+'...' : 'none'}, TransactionId: ${transactionId ? transactionId.slice(0,12)+'...' : 'none'}, QueryId: ${searchTimelineQueryId || 'none'}`,'info');
+  // Defensive: check for all required tokens and queryId
+  if (!bearerToken || !csrfToken || !transactionId || !searchTimelineQueryId) {
+    log('FETCH', `Missing required credentials. Bearer: ${!!bearerToken}, CSRF: ${!!csrfToken}, TransactionId: ${!!transactionId}, QueryId: ${!!searchTimelineQueryId}`,'error');
+    log('FETCH', `States: Bearer: ${bearerToken}, CSRF: ${csrfToken}, TransactionId: ${transactionId}, QueryId: ${searchTimelineQueryId}`,'error');
     return;
   }
-  // Compose API URL for user's timeline
-  const url = `https://x.com/i/api/graphql/nKAncKPF1fV1xltvF3UUlw/SearchTimeline?variables=${encodeURIComponent(JSON.stringify({rawQuery:`from:${username} min_faves:999`,count:20,querySource:'typed_query',product:'Top'}))}&features=${encodeURIComponent(JSON.stringify({rweb_video_screen_enabled:false,profile_label_improvements_pcf_label_in_post_enabled:true,rweb_tipjar_consumption_enabled:true,verified_phone_label_enabled:false,creator_subscriptions_tweet_preview_api_enabled:true,responsive_web_graphql_timeline_navigation_enabled:true,responsive_web_graphql_skip_user_profile_image_extensions_enabled:false,premium_content_api_read_enabled:false,communities_web_enable_tweet_community_results_fetch:true,c9s_tweet_anatomy_moderator_badge_enabled:true,responsive_web_grok_analyze_button_fetch_trends_enabled:false,responsive_web_grok_analyze_post_followups_enabled:true,responsive_web_jetfuel_frame:false,responsive_web_grok_share_attachment_enabled:true,articles_preview_enabled:true,responsive_web_edit_tweet_api_enabled:true,graphql_is_translatable_rweb_tweet_is_translatable_enabled:true,view_counts_everywhere_api_enabled:true,longform_notetweets_consumption_enabled:true,responsive_web_twitter_article_tweet_consumption_enabled:true,tweet_awards_web_tipping_enabled:false,responsive_web_grok_show_grok_translated_post:false,responsive_web_grok_analysis_button_from_backend:true,creator_subscriptions_quote_tweet_preview_enabled:false,freedom_of_speech_not_reach_fetch_enabled:true,standardized_nudges_misinfo:true,tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled:true,longform_notetweets_rich_text_read_enabled:true,longform_notetweets_inline_media_enabled:true,responsive_web_grok_image_annotation_enabled:true,responsive_web_enhance_cards_enabled:false}))}`;
+  // Compose API URL for user's timeline using the dynamic queryId
+  // Major assumption: queryId is always correct and up to date (background.js keeps it fresh)
+  const url = `https://x.com/i/api/graphql/${searchTimelineQueryId}/SearchTimeline?variables=${encodeURIComponent(JSON.stringify({rawQuery:`from:${username} min_faves:999`,count:20,querySource:'typed_query',product:'Top'}))}&features=%7B%22rweb_video_screen_enabled%22%3Afalse%2C%22profile_label_improvements_pcf_label_in_post_enabled%22%3Atrue%2C%22rweb_tipjar_consumption_enabled%22%3Atrue%2C%22verified_phone_label_enabled%22%3Afalse%2C%22creator_subscriptions_tweet_preview_api_enabled%22%3Atrue%2C%22responsive_web_graphql_timeline_navigation_enabled%22%3Atrue%2C%22responsive_web_graphql_skip_user_profile_image_extensions_enabled%22%3Afalse%2C%22premium_content_api_read_enabled%22%3Afalse%2C%22communities_web_enable_tweet_community_results_fetch%22%3Atrue%2C%22c9s_tweet_anatomy_moderator_badge_enabled%22%3Atrue%2C%22responsive_web_grok_analyze_button_fetch_trends_enabled%22%3Afalse%2C%22responsive_web_grok_analyze_post_followups_enabled%22%3Atrue%2C%22responsive_web_jetfuel_frame%22%3Afalse%2C%22responsive_web_grok_share_attachment_enabled%22%3Atrue%2C%22articles_preview_enabled%22%3Atrue%2C%22responsive_web_edit_tweet_api_enabled%22%3Atrue%2C%22graphql_is_translatable_rweb_tweet_is_translatable_enabled%22%3Atrue%2C%22view_counts_everywhere_api_enabled%22%3Atrue%2C%22longform_notetweets_consumption_enabled%22%3Atrue%2C%22responsive_web_twitter_article_tweet_consumption_enabled%22%3Atrue%2C%22tweet_awards_web_tipping_enabled%22%3Afalse%2C%22responsive_web_grok_show_grok_translated_post%22%3Afalse%2C%22responsive_web_grok_analysis_button_from_backend%22%3Atrue%2C%22creator_subscriptions_quote_tweet_preview_enabled%22%3Afalse%2C%22freedom_of_speech_not_reach_fetch_enabled%22%3Atrue%2C%22standardized_nudges_misinfo%22%3Atrue%2C%22tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled%22%3Atrue%2C%22longform_notetweets_rich_text_read_enabled%22%3Atrue%2C%22longform_notetweets_inline_media_enabled%22%3Atrue%2C%22responsive_web_grok_image_annotation_enabled%22%3Atrue%2C%22responsive_web_enhance_cards_enabled%22%3Afalse%7D`;
 
   log('FETCH', `Fetching timeline for @${username} from ${url}`, 'info');
 
+  const header = {
+    headers: {
+      'accept': '*/*',
+      'accept-language': 'en-US,en;q=0.9',
+      'authorization': `Bearer ${bearerToken}`,
+      'content-type': 'application/json',
+      'priority': 'u=1, i',
+      'x-client-transaction-id': transactionId,
+      "sec-ch-ua": "\"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not.A/Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "\"macOS\"",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      'x-csrf-token': csrfToken,
+      'x-twitter-active-user': 'yes',
+      'x-twitter-auth-type': 'OAuth2Session',
+      'x-twitter-client-language': 'en'
+    },
+    referrer: window.location.href,
+    "referrer": "https://x.com/search?q=from%3Aaltryne%20min_faves%3A999&src=typed_query",
+    referrerPolicy: 'strict-origin-when-cross-origin',
+    body: null,
+    method: 'GET',
+    mode: 'cors',
+    credentials: 'include'
+  };
+
   try {
-    const resp = await fetch(url, {
-      headers: {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'authorization': `Bearer ${bearer}`,
-        'content-type': 'application/json',
-        'priority': 'u=1, i',
-        'x-client-transaction-id': transactionId,
-        'x-csrf-token': csrf,
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en'
-      },
-      referrer: window.location.href,
-      referrerPolicy: 'strict-origin-when-cross-origin',
-      method: 'GET',
-      mode: 'cors',
-      credentials: 'include'
-    });
+    const resp = await fetch(url, header);
+
+    console.log(`
+var abc = await fetch("${url}", ${JSON.stringify(header, null, 2)});
+
+console.log('----1')
+console.log(abc)
+console.log('----1')
+abc = await abc.text()
+console.log('----2')
+console.log(abc)    
+`)
+
     log('FETCH', `Response status: ${resp.status}`, resp.ok ? 'success' : 'warn');
     if (!resp.ok) {
       const errText = await resp.text();
@@ -338,5 +379,35 @@ function renderTweets(data) {
     fetchProfileTimeline(username);
   });
 })();
+
+//////////////////////////////
+// Transaction ID Request Demo //
+//////////////////////////////
+
+/**
+ * Request a transaction ID from the active Twitter/X tab via background.js relay.
+ * Logs result to console and can be plugged into UI as needed.
+ */
+function requestTransactionIdFromActiveTab() {
+  log('TID', 'Requesting Transaction ID from active Twitter/X tab...', 'info');
+  chrome.runtime.sendMessage({
+    action: 'relayToActiveTab',
+    payload: { action: 'generateTID' }
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('TID', `Error relaying to background: ${chrome.runtime.lastError.message}`, 'error');
+      return;
+    }
+    if (response && response.tid) {
+      log('TID', `Transaction ID: ${response.tid}`, 'success');
+      // You can now use response.tid in your UI or API calls
+    } else {
+      log('TID', `Failed to get TID: ${response && response.error}`, 'error');
+    }
+  });
+}
+
+// Demo: Request TID on panel load
+requestTransactionIdFromActiveTab();
 
 // [INFO][END] index.js loaded and monitoring for profile page changes.

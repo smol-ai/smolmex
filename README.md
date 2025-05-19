@@ -2,6 +2,10 @@
 notes to self
 
 - only load from `dist` directory after running `npm run build` because there is a build step for extract-content.js
+- https://chatgpt.com/c/682ab5d9-b3b8-8012-9d7c-7bed9c50801b
+- https://github.com/alihassantahir/x-client-transaction-id-js/blob/main/X-Client-Transaction-ID.js
+- https://deepwiki.com/alihassantahir/x-client-transaction-id-js
+- https://github.com/iSarabjitDhiman/XClientTransaction
 
 
 
